@@ -1,117 +1,84 @@
 import streamlit as st
-import math
-import re
 import pandas as pd
+import re
 from collections import defaultdict
+import math
 from underthesea import word_tokenize
 
-# --- CẤU HÌNH TRANG ---
-st.set_page_config(page_title="Vietnamese Spam Detector", page_icon="🛡️")
+# --- OPTIMIZED TOKENIZER ---
+def clean_tokenize(text, stop_words):
+    text = str(text).lower()
+    # Tách từ bằng underthesea
+    tokens = word_tokenize(text, format="chose")
+    # Lọc nhiễu và từ dừng
+    words = [w for w in tokens if re.match(r'^\w+$', w) and w not in stop_words]
+    
+    # TẠO BIGRAMS: Ghép cặp 2 từ liên tiếp để bắt được cụm "trúng_thưởng", "cho_vay"
+    bigrams = [f"{words[i]}_{words[i+1]}" for i in range(len(words)-1)]
+    
+    return words + bigrams # Kết hợp cả từ đơn và từ ghép
 
-# --- 1. TẢI STOP WORDS & DỮ LIỆU (Dùng cache để không load lại khi nhấn nút) ---
-@st.cache_resource
-def load_stopwords(file_path):
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            return {line.strip().lower() for line in f if line.strip()}
-    except:
-        return set()
-
-STOP_WORDS = load_stopwords('vietnamese-stopwords.txt')
-
-def tokenize(message):
-    text = str(message).lower().strip()
-    if not text:
-        return set()
-    try:
-        segmented_text = word_tokenize(text, format="chose")
-        if isinstance(segmented_text, list):
-            segmented_text = " ".join(segmented_text)
-    except:
-        segmented_text = text
-    all_words = re.findall(r"\w+", segmented_text, flags=re.UNICODE)
-    return {word for word in all_words if word not in STOP_WORDS}
-
-class VietnameseNaiveBayes:
-    def __init__(self, k=0.5):
+class BetterNaiveBayes:
+    def __init__(self, k=1.0):
         self.k = k
-        self.word_probs = []
+        self.vocab = set()
+        self.word_counts = {'spam': defaultdict(int), 'ham': defaultdict(int)}
+        self.class_counts = {'spam': 0, 'ham': 0}
 
-    def train(self, df):
-        df = df.dropna(subset=['labels', 'texts_vi'])
-        num_spams = len(df[df['labels'] == 'spam'])
-        num_non_spams = len(df) - num_spams
-        word_counts = defaultdict(lambda: [0, 0])
+    def train(self, df, stop_words):
         for _, row in df.iterrows():
-            is_spam = (row['labels'] == 'spam')
-            for word in tokenize(row['texts_vi']):
-                word_counts[word][0 if is_spam else 1] += 1
-        self.word_probs = [
-            (w,
-             (spam + self.k) / (num_spams + 2 * self.k),
-             (non_spam + self.k) / (num_non_spams + 2 * self.k))
-            for w, (spam, non_spam) in word_counts.items()
-        ]
+            label = row['labels']
+            tokens = clean_tokenize(row['texts_vi'], stop_words)
+            self.class_counts[label] += 1
+            for token in tokens:
+                self.word_counts[label][token] += 1
+                self.vocab.add(token)
 
-    def classify(self, message):
-        message_words = tokenize(message)
-        log_prob_if_spam = log_prob_if_not_spam = 0.0
-        for word, p_spam, p_ham in self.word_probs:
-            if word in message_words:
-                log_prob_if_spam += math.log(p_spam)
-                log_prob_if_not_spam += math.log(p_ham)
-            else:
-                log_prob_if_spam += math.log(1.0 - p_spam)
-                log_prob_if_not_spam += math.log(1.0 - p_ham)
-        max_log = max(log_prob_if_spam, log_prob_if_not_spam)
-        prob_if_spam = math.exp(log_prob_if_spam - max_log)
-        prob_if_not_spam = math.exp(log_prob_if_not_spam - max_log)
-        return prob_if_spam / (prob_if_spam + prob_if_not_spam)
+    def classify(self, text, stop_words):
+        tokens = clean_tokenize(text, stop_words)
+        log_prob_spam = math.log(self.class_counts['spam'] / sum(self.class_counts.values()))
+        log_prob_ham = math.log(self.class_counts['ham'] / sum(self.class_counts.values()))
 
-# --- 2. KHỞI TẠO MÔ HÌNH ---
+        n_spam = sum(self.word_counts['spam'].values())
+        n_ham = sum(self.word_counts['ham'].values())
+        v_size = len(self.vocab)
+
+        for token in tokens:
+            if token in self.vocab:
+                # Laplace smoothing
+                log_prob_spam += math.log((self.word_counts['spam'][token] + self.k) / (n_spam + self.k * v_size))
+                log_prob_ham += math.log((self.word_counts['ham'][token] + self.k) / (n_ham + self.k * v_size))
+
+        # Chuyển đổi sang xác suất %
+        max_log = max(log_prob_spam, log_prob_ham)
+        prob_spam = math.exp(log_prob_spam - max_log)
+        prob_ham = math.exp(log_prob_ham - max_log)
+        return prob_spam / (prob_spam + prob_ham)
+
+# --- UI STREAMLIT ---
+st.title("🛡️ Spam Detector Pro")
+
 @st.cache_resource
-def get_trained_model():
-    classifier = VietnameseNaiveBayes(k=0.5)
+def load_all():
+    # Tải stopwords
     try:
-        df = pd.read_csv('datavn.csv', sep=';', encoding='utf-8-sig')
-        classifier.train(df)
-        return classifier
-    except Exception as e:
-        st.error(f"Lỗi nạp dữ liệu: {e}")
-        return None
+        with open('vietnamese-stopwords.txt', 'r', encoding='utf-8') as f:
+            stop_words = {line.strip() for line in f}
+    except:
+        stop_words = set()
+    
+    # Train model
+    model = BetterNaiveBayes()
+    df = pd.read_csv('datavn.csv', sep=';', encoding='utf-8-sig')
+    model.train(df, stop_words)
+    return model, stop_words
 
-classifier = get_trained_model()
+model, stop_words = load_all()
 
-# --- 3. GIAO DIỆN NGƯỜI DÙNG (UI) ---
-st.title("🛡️ Kiểm tra Tin nhắn Spam Tiếng Việt")
-st.markdown("Hệ thống sử dụng thuật toán **Naive Bayes** và thư viện **Underthesea**.")
-
-input_text = st.text_area("Nhập nội dung tin nhắn cần kiểm tra:", height=150, placeholder="Ví dụ: Chúc mừng bạn đã trúng thưởng...")
-
-if st.button("Phân loại ngay"):
-    if not input_text.strip():
-        st.warning("Vui lòng nhập nội dung!")
+msg = st.text_area("Nhập tin nhắn:")
+if st.button("Kiểm tra"):
+    score = model.classify(msg, stop_words)
+    if score > 0.8:
+        st.error(f"Cảnh báo Spam: {score*100:.2f}%")
     else:
-        # 1. Kiểm tra Whitelist
-        whitelist = ['.edu.vn', 'daotao', 'phòng qlđt', 'nhà trường', 'thông báo', 'phqldt']
-        is_whitelisted = any(key in input_text.lower() for key in whitelist)
-        
-        if is_whitelisted:
-            spam_prob = 0.0
-            is_spam = False
-        else:
-            # 2. Chạy model
-            spam_prob = classifier.classify(input_text)
-            is_spam = spam_prob > 0.92
-
-        # Hiển thị kết quả
-        st.divider()
-        if is_spam:
-            st.error(f"### 🚩 KẾT QUẢ: TIN NHẮN SPAM")
-        else:
-            st.success(f"### ✅ KẾT QUẢ: TIN NHẮN AN TOÀN")
-        
-        st.metric("Xác suất Spam", f"{spam_prob*100:.2f}%")
-        
-        if is_whitelisted:
-            st.info("Tin nhắn này nằm trong danh sách ưu tiên (Whitelist).")
+        st.success(f"Tin nhắn sạch: {score*100:.2f}%")
