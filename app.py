@@ -13,7 +13,7 @@ def clean_tokenize(text, stop_words):
     # Lọc nhiễu và từ dừng
     words = [w for w in tokens if re.match(r'^\w+$', w) and w not in stop_words]
     
-    # TẠO BIGRAMS: Ghép cặp 2 từ liên tiếp để bắt được cụm "trúng_thưởng", "cho_vay"
+    # TẠO BIGRAMS: 
     bigrams = [f"{words[i]}_{words[i+1]}" for i in range(len(words)-1)]
     
     return words + bigrams # Kết hợp cả từ đơn và từ ghép
